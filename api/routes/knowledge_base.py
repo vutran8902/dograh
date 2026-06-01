@@ -1,5 +1,6 @@
 """API routes for knowledge base operations."""
 
+import hashlib
 import uuid
 from typing import Annotated, Optional
 
@@ -16,6 +17,7 @@ from api.schemas.knowledge_base import (
     DocumentUploadRequestSchema,
     DocumentUploadResponseSchema,
     ProcessDocumentRequestSchema,
+    TextDocumentUploadRequestSchema,
 )
 from api.sdk_expose import sdk_expose
 from api.services.auth.depends import get_user
@@ -25,6 +27,132 @@ from api.tasks.arq import enqueue_job
 from api.tasks.function_names import FunctionNames
 
 router = APIRouter(prefix="/knowledge-base", tags=["knowledge-base"])
+
+
+@router.post(
+    "/text-document",
+    response_model=DocumentResponseSchema,
+    summary="Create full-text document",
+)
+async def create_text_document(
+    request: TextDocumentUploadRequestSchema,
+    user=Depends(get_user),
+):
+    """Create a completed full-document knowledge record from text.
+
+    This path is for server-generated markdown/text knowledge where the
+    content is already extracted. It avoids the browser/S3 upload and MPS
+    parsing pipeline used for user-uploaded files.
+    """
+
+    try:
+        content_bytes = request.content.encode("utf-8")
+        document_uuid = str(uuid.uuid4())
+        file_hash = hashlib.sha256(content_bytes).hexdigest()
+        existing_document = await db_client.get_document_by_hash(
+            file_hash=file_hash,
+            organization_id=user.selected_organization_id,
+        )
+
+        if (
+            existing_document
+            and existing_document.processing_status == "completed"
+            and existing_document.retrieval_mode == "full_document"
+        ):
+            logger.info(
+                f"Reusing direct text document {existing_document.document_uuid} "
+                f"for org {user.selected_organization_id}"
+            )
+            return DocumentResponseSchema(
+                id=existing_document.id,
+                document_uuid=existing_document.document_uuid,
+                filename=existing_document.filename,
+                file_size_bytes=existing_document.file_size_bytes,
+                file_hash=existing_document.file_hash,
+                mime_type=existing_document.mime_type,
+                processing_status=existing_document.processing_status,
+                processing_error=existing_document.processing_error,
+                total_chunks=existing_document.total_chunks,
+                retrieval_mode=existing_document.retrieval_mode,
+                custom_metadata=existing_document.custom_metadata,
+                docling_metadata=existing_document.docling_metadata,
+                source_url=existing_document.source_url,
+                created_at=existing_document.created_at,
+                updated_at=existing_document.updated_at,
+                organization_id=existing_document.organization_id,
+                created_by=existing_document.created_by,
+                is_active=existing_document.is_active,
+            )
+
+        document = await db_client.create_document(
+            organization_id=user.selected_organization_id,
+            created_by=user.id,
+            filename=request.filename,
+            file_size_bytes=len(content_bytes),
+            file_hash=file_hash,
+            mime_type=request.mime_type,
+            custom_metadata={
+                **(request.custom_metadata or {}),
+                "source": "text_document",
+            },
+            document_uuid=document_uuid,
+            retrieval_mode="full_document",
+        )
+
+        await db_client.update_document_full_text(document.id, request.content)
+        completed = await db_client.update_document_status(
+            document.id,
+            "completed",
+            total_chunks=0,
+            docling_metadata={"source": "direct_text"},
+        )
+
+        doc = completed or document
+
+        logger.info(
+            f"Created direct text document {document_uuid} "
+            f"(id={document.id}) for org {user.selected_organization_id}"
+        )
+
+        capture_event(
+            distinct_id=str(user.provider_id),
+            event=PostHogEvent.KNOWLEDGE_BASE_CREATED,
+            properties={
+                "document_id": document.id,
+                "document_uuid": document_uuid,
+                "filename": request.filename,
+                "retrieval_mode": "full_document",
+                "organization_id": user.selected_organization_id,
+                "source": "direct_text",
+            },
+        )
+
+        return DocumentResponseSchema(
+            id=doc.id,
+            document_uuid=doc.document_uuid,
+            filename=doc.filename,
+            file_size_bytes=doc.file_size_bytes,
+            file_hash=doc.file_hash,
+            mime_type=doc.mime_type,
+            processing_status=doc.processing_status,
+            processing_error=doc.processing_error,
+            total_chunks=doc.total_chunks,
+            retrieval_mode=doc.retrieval_mode,
+            custom_metadata=doc.custom_metadata,
+            docling_metadata=doc.docling_metadata,
+            source_url=doc.source_url,
+            created_at=doc.created_at,
+            updated_at=doc.updated_at,
+            organization_id=doc.organization_id,
+            created_by=doc.created_by,
+            is_active=doc.is_active,
+        )
+
+    except Exception as exc:
+        logger.error(f"Error creating direct text document: {exc}")
+        raise HTTPException(
+            status_code=500, detail="Failed to create text document"
+        ) from exc
 
 
 @router.post(

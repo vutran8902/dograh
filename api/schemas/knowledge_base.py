@@ -35,6 +35,17 @@ class ProcessDocumentRequestSchema(BaseModel):
     )
 
 
+class TextDocumentUploadRequestSchema(BaseModel):
+    """Request schema for creating a completed full-text document directly."""
+
+    filename: str = Field(..., description="Name of the text document")
+    content: str = Field(..., description="Full text content to store")
+    mime_type: str = Field(default="text/markdown", description="MIME type of the document")
+    custom_metadata: Optional[Dict[str, Any]] = Field(
+        default=None, description="Optional custom metadata"
+    )
+
+
 class DocumentResponseSchema(BaseModel):
     """Response schema for document metadata."""
 

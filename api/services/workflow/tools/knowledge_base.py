@@ -16,6 +16,67 @@ from api.db import db_client
 from api.services.gen_ai import OpenAIEmbeddingService
 from api.services.pipecat.tracing_config import ensure_tracing
 
+FULL_DOCUMENT_CONTEXT_MAX_CHARS = 24000
+
+
+async def build_full_document_knowledge_context(
+    *,
+    organization_id: int,
+    document_uuids: Optional[List[str]],
+    max_chars: int = FULL_DOCUMENT_CONTEXT_MAX_CHARS,
+) -> str:
+    """Build prompt context for attached full-document knowledge.
+
+    Full-document knowledge is intended for small reference docs such as
+    menus, business info, policies, and FAQs. Injecting it into the system
+    prompt makes those facts available on every turn instead of hoping the LLM
+    decides to call the retrieval tool before answering.
+    """
+    if not document_uuids:
+        return ""
+
+    documents = await db_client.get_full_text_documents(
+        organization_id=organization_id,
+        document_uuids=document_uuids,
+    )
+    if not documents:
+        return ""
+
+    sections: list[str] = []
+    remaining_chars = max_chars
+
+    for document in documents:
+        full_text = (document.full_text or "").strip()
+        if not full_text or remaining_chars <= 0:
+            continue
+
+        header = f"### {document.filename}\n"
+        available_for_body = max(0, remaining_chars - len(header))
+        if available_for_body <= 0:
+            break
+
+        body = full_text[:available_for_body].rstrip()
+        if len(full_text) > available_for_body:
+            body = f"{body}\n[Document truncated for prompt context.]"
+
+        section = f"{header}{body}"
+        sections.append(section)
+        remaining_chars -= len(section)
+
+    if not sections:
+        return ""
+
+    return (
+        "ATTACHED KNOWLEDGE DOCUMENTS - USE BEFORE ANSWERING:\n"
+        "The following documents are attached to this conversation step. "
+        "Use them as the source of truth for business facts such as name, "
+        "location, hours, services, pricing, policies, and scheduling rules. "
+        "If the answer is present here, answer from this knowledge instead of "
+        "guessing. If the answer is not present, say you do not have that "
+        "detail.\n\n"
+        + "\n\n---\n\n".join(sections)
+    )
+
 
 async def retrieve_from_knowledge_base(
     query: str,

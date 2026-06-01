@@ -1,3 +1,4 @@
+import hashlib
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -274,6 +275,86 @@ async def test_text_chat_message_executes_assistant_turn(
         "Welcome to the workflow tester.",
         "Hello from the workflow tester.",
     ]
+
+
+@pytest.mark.asyncio
+async def test_text_chat_injects_attached_full_document_knowledge(
+    db_session,
+    async_session,
+    test_client_factory,
+):
+    document_uuid = "11111111-1111-4111-8111-111111111111"
+    workflow_definition = {
+        "nodes": [
+            {
+                "id": "start",
+                "type": "startCall",
+                "position": {"x": 0, "y": 0},
+                "data": {
+                    "name": "Start",
+                    "prompt": "You are a helpful front desk assistant.",
+                    "is_start": True,
+                    "allow_interrupt": False,
+                    "add_global_prompt": False,
+                    "greeting_type": "text",
+                    "greeting": "Welcome to the workflow tester.",
+                    "document_uuids": [document_uuid],
+                },
+            }
+        ],
+        "edges": [],
+    }
+
+    user, workflow = await _create_user_and_workflow(
+        db_session,
+        async_session,
+        workflow_definition=workflow_definition,
+        suffix="full-document-knowledge",
+    )
+
+    content = (
+        "# Operator ARC Agent Knowledge\n\n"
+        "Business name: Global Nail Studio\n"
+        "Business address: 123 Garden Street, Austin, TX\n"
+        "Use this knowledge to answer customer questions."
+    )
+    document = await db_session.create_document(
+        organization_id=user.selected_organization_id,
+        created_by=user.id,
+        filename="operator_arc_agent_context_22_v4.md",
+        file_size_bytes=len(content.encode("utf-8")),
+        file_hash=hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        mime_type="text/markdown",
+        document_uuid=document_uuid,
+        retrieval_mode="full_document",
+    )
+    await db_session.update_document_full_text(document.id, content)
+    await db_session.update_document_status(document.id, "completed", total_chunks=0)
+
+    llm = MockLLMService(mock_steps=[], chunk_delay=0.001)
+
+    async with test_client_factory(user) as client:
+        with (
+            patch(
+                "api.services.workflow.text_chat_runner.create_llm_service",
+                return_value=llm,
+            ),
+            patch(
+                "api.services.workflow.text_chat_runner.db_client.has_active_recordings",
+                new=AsyncMock(return_value=False),
+            ),
+        ):
+            create_response = await client.post(
+                f"/api/v1/workflow/{workflow.id}/text-chat/sessions",
+                json={},
+            )
+
+    assert create_response.status_code == 200
+    system_instruction = llm._settings.system_instruction
+    assert "ATTACHED KNOWLEDGE DOCUMENTS - USE BEFORE ANSWERING" in system_instruction
+    assert "operator_arc_agent_context_22_v4.md" in system_instruction
+    assert "Global Nail Studio" in system_instruction
+    assert "123 Garden Street, Austin, TX" in system_instruction
 
 
 @pytest.mark.asyncio

@@ -51,6 +51,7 @@ from api.services.workflow.pipecat_engine_variable_extractor import (
     VariableExtractionManager,
 )
 from api.services.workflow.tools.knowledge_base import (
+    build_full_document_knowledge_context,
     retrieve_from_knowledge_base,
 )
 from api.utils.template_renderer import render_template
@@ -528,6 +529,22 @@ class PipecatEngine:
             format_prompt=self._format_prompt,
             has_recordings=self._has_recordings,
         )
+        if node.document_uuids:
+            organization_id = await self._get_organization_id()
+            if organization_id:
+                knowledge_context = await build_full_document_knowledge_context(
+                    organization_id=organization_id,
+                    document_uuids=node.document_uuids,
+                )
+                if knowledge_context:
+                    system_prompt = "\n\n".join(
+                        part for part in (system_prompt, knowledge_context) if part
+                    )
+            else:
+                logger.warning(
+                    "Cannot inject attached knowledge documents because organization "
+                    "ID is unavailable"
+                )
         functions = await compose_functions_for_node(
             node=node,
             custom_tool_manager=self._custom_tool_manager,
